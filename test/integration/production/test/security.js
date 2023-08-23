@@ -2,14 +2,10 @@
 /* global browserName */
 import webdriver from 'next-webdriver'
 import { readFileSync } from 'fs'
+import http from 'http'
 import url from 'url'
 import { join } from 'path'
-import {
-  renderViaHTTP,
-  getBrowserBodyText,
-  waitFor,
-  fetchViaHTTP,
-} from 'next-test-utils'
+import { getBrowserBodyText, waitFor, fetchViaHTTP } from 'next-test-utils'
 import { recursiveReadDir } from 'next/dist/lib/recursive-readdir'
 import { homedir } from 'os'
 
@@ -27,6 +23,32 @@ async function checkInjected(browser) {
 
 module.exports = (context) => {
   describe('With Security Related Issues', () => {
+    it.skip('should handle invalid URL properly', async () => {
+      async function invalidRequest() {
+        return new Promise((resolve, reject) => {
+          const request = http.request(
+            {
+              hostname: `localhost`,
+              port: context.appPort,
+              path: `*`,
+            },
+            (response) => {
+              resolve(response.statusCode)
+            }
+          )
+          request.on('error', (err) => reject(err))
+          request.end()
+        })
+      }
+      try {
+        expect(await invalidRequest()).toBe(400)
+        expect(await invalidRequest()).toBe(400)
+      } catch (err) {
+        // eslint-disable-next-line
+        expect(err.code).toBe('ECONNREFUSED')
+      }
+    })
+
     it('should only access files inside .next directory', async () => {
       const buildId = readFileSync(join(__dirname, '../.next/BUILD_ID'), 'utf8')
 
@@ -46,8 +68,10 @@ module.exports = (context) => {
       ]
 
       for (const path of pathsToCheck) {
-        const data = await renderViaHTTP(context.appPort, path)
+        const res = await fetchViaHTTP(context.appPort, path)
+        const data = await res.text()
         expect(data.includes('cool-version')).toBeFalsy()
+        expect([400, 404].includes(res.status)).toBeTruthy()
       }
     })
 
@@ -74,7 +98,9 @@ module.exports = (context) => {
       const buildId = readFileSync(join(__dirname, '../.next/BUILD_ID'), 'utf8')
 
       const readPath = join(__dirname, `../.next/static/${buildId}`)
-      const buildFiles = await recursiveReadDir(readPath, /\.js$/)
+      const buildFiles = await recursiveReadDir(readPath, (f) =>
+        /\.js$/.test(f)
+      )
 
       if (buildFiles.length < 1) {
         throw new Error('Could not locate any build files')
@@ -195,7 +221,7 @@ module.exports = (context) => {
       )
       expect(res.status).toBe(307)
       expect(pathname).toBe(encodeURI('/\\google.com/about'))
-      expect(hostname).toBe('localhost')
+      expect(hostname).toBeOneOf(['localhost', '127.0.0.1'])
     })
 
     it('should handle encoded value in the pathname correctly %', async () => {
@@ -213,7 +239,7 @@ module.exports = (context) => {
       )
       expect(res.status).toBe(307)
       expect(pathname).toBe('/%25google.com/about')
-      expect(hostname).toBe('localhost')
+      expect(hostname).toBeOneOf(['localhost', '127.0.0.1'])
     })
 
     it('should handle encoded value in the query correctly', async () => {
@@ -231,7 +257,7 @@ module.exports = (context) => {
       )
       expect(res.status).toBe(308)
       expect(pathname).toBe('/trailing-redirect')
-      expect(hostname).toBe('localhost')
+      expect(hostname).toBeOneOf(['localhost', '127.0.0.1'])
       expect(query).toBe(
         'url=https%3A%2F%2Fgoogle.com%2Fimage%3Fcrop%3Dfocalpoint%26w%3D24&w=1200&q=100'
       )
@@ -292,14 +318,13 @@ module.exports = (context) => {
     })
 
     if (browserName !== 'internet explorer') {
-      it('should not execute script embedded inside svg image', async () => {
+      it('should not execute script embedded inside svg image, even if dangerouslyAllowSVG=true', async () => {
         let browser
         try {
           browser = await webdriver(context.appPort, '/svg-image')
           await browser.eval(`document.getElementById("img").scrollIntoView()`)
-          expect(
-            await browser.elementById('img').getAttribute('src')
-          ).toContain('xss.svg')
+          const src = await browser.elementById('img').getAttribute('src')
+          expect(src).toMatch(/_next\/image\?.*xss\.svg/)
           expect(await browser.elementById('msg').text()).toBe('safe')
           browser = await webdriver(
             context.appPort,
